@@ -1,0 +1,17 @@
+[project]
+name = "transcription-live"
+version = "0.1.0"
+description = "Real-time Hinglish transcription POC using faster-whisper + FastAPI WebSocket"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "faster-whisper>=1.1.0",
+    "numpy>=1.26.0",
+    "python-dotenv>=1.0.0",
+    # CUDA runtime libs needed by ctranslate2 for GPU inference
+    "nvidia-cublas-cu12>=12.4.2",
+    "nvidia-cudnn-cu12>=9.1.0",
+    "nvidia-cufft-cu12>=11.2.0",
+]
