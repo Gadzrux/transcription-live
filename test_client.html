@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lip-Sync Test</title>
+</head>
+<body>
+    <h1>WebSocket Lip-Sync Tester</h1>
+    
+    <input type="file" id="audioFile" accept="audio/*">
+    <button onclick="sendAudio()">Send Audio</button>
+    
+    <div id="status"></div>
+    <video id="output" controls width="640"></video>
+    
+    <script>
+        const ws = new WebSocket('ws://localhost:8001');
+        
+        ws.onopen = () => {
+            document.getElementById('status').innerText = '✅ Connected';
+        };
+        
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            if (data.type === 'video') {
+                const videoBlob = base64ToBlob(data.data, 'video/mp4');
+                const url = URL.createObjectURL(videoBlob);
+                document.getElementById('output').src = url;
+                document.getElementById('status').innerText = '✅ Video received!';
+            } else if (data.type === 'error') {
+                document.getElementById('status').innerText = '❌ Error: ' + data.message;
+            }
+        };
+        
+        async function sendAudio() {
+            const file = document.getElementById('audioFile').files[0];
+            if (!file) {
+                alert('Please select an audio file');
+                return;
+            }
+            
+            document.getElementById('status').innerText = '⏳ Sending audio...';
+            
+            const arrayBuffer = await file.arrayBuffer();
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+            
+            ws.send(JSON.stringify({
+                type: 'audio',
+                audio: base64
+            }));
+        }
+        
+        function base64ToBlob(base64, mimeType) {
+            const byteCharacters = atob(base64);
+            const byteArrays = [];
+            
+            for (let i = 0; i < byteCharacters.length; i += 512) {
+                const slice = byteCharacters.slice(i, i + 512);
+                const byteNumbers = new Array(slice.length);
+                for (let j = 0; j < slice.length; j++) {
+                    byteNumbers[j] = slice.charCodeAt(j);
+                }
+                byteArrays.push(new Uint8Array(byteNumbers));
+            }
+            
+            return new Blob(byteArrays, { type: mimeType });
+        }
+    </script>
+</body>
+</html>

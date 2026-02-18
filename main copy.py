@@ -102,16 +102,11 @@ TRANSCRIBE_INTERVAL = float(os.getenv("TRANSCRIBE_INTERVAL", "1.5"))
 SLIDING_WINDOW_SECONDS = float(os.getenv("SLIDING_WINDOW", "15"))
 
 # Hinglish-optimised initial prompt – biases the model towards code-switching.
-# Use short keywords only; full sentences can be echoed/hallucinated in output.
-INITIAL_PROMPT = "Hindi English Hinglish code-mixing."
-
-# Phrases that Whisper may echo from the prompt; strip them from output.
-PROMPT_LEAKAGE_PHRASES = [
-    "This is a Hinglish conversation with both Hindi and English",
-    "This is a Hinglish conversation with both Hindi and English words",
-    "Yeh ek Hindi aur English mixed conversation hai",
-    "Main abhi transcription test kar raha hoon",
-]
+INITIAL_PROMPT = (
+    "Yeh ek Hindi aur English mixed conversation hai. "
+    "Main abhi transcription test kar raha hoon. "
+    "This is a Hinglish conversation with both Hindi and English words."
+)
 
 
 def _parse_allowed_languages() -> set[str] | None:
