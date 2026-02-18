@@ -105,14 +105,6 @@ SLIDING_WINDOW_SECONDS = float(os.getenv("SLIDING_WINDOW", "15"))
 # Use short keywords only; full sentences can be echoed/hallucinated in output.
 INITIAL_PROMPT = ""  # removed initial prompt so there is no leak in prompts (Krishnava)
 
-# Phrases that Whisper may echo from the prompt; strip them from output.
-PROMPT_LEAKAGE_PHRASES = [
-    "This is a Hinglish conversation with both Hindi and English",
-    "This is a Hinglish conversation with both Hindi and English words",
-    "Yeh ek Hindi aur English mixed conversation hai",
-    "Main abhi transcription test kar raha hoon",
-]
-
 
 def _parse_allowed_languages() -> set[str] | None:
     """Parse ALLOWED_LANGUAGES into a set, or None if unrestricted."""
