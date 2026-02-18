@@ -97,21 +97,16 @@ MIN_AUDIO_SECONDS = 1.5
 # Throttle: minimum gap between successive transcriptions (seconds).
 TRANSCRIBE_INTERVAL = float(os.getenv("TRANSCRIBE_INTERVAL", "1.5"))
 
-# Chunk size: minimum new audio (seconds) to transcribe per cycle.
-# Each chunk is transcribed exactly once and appended — no overlapping or repetition.
-CHUNK_SECONDS = float(os.getenv("CHUNK_SECONDS", "3.0"))
+# Sliding window: only transcribe the last N seconds of audio.
+# Keeps latency constant regardless of how long the recording runs.
+SLIDING_WINDOW_SECONDS = float(os.getenv("SLIDING_WINDOW", "15"))
 
 # Hinglish-optimised initial prompt – biases the model towards code-switching.
-# Use short keywords only; full sentences can be echoed/hallucinated in output.
-INITIAL_PROMPT = "Hindi English Hinglish code-mixing."
-
-# Phrases that Whisper may echo from the prompt; strip them from output.
-PROMPT_LEAKAGE_PHRASES = [
-    "This is a Hinglish conversation with both Hindi and English",
-    "This is a Hinglish conversation with both Hindi and English words",
-    "Yeh ek Hindi aur English mixed conversation hai",
-    "Main abhi transcription test kar raha hoon",
-]
+INITIAL_PROMPT = (
+    "Yeh ek Hindi aur English mixed conversation hai. "
+    "Main abhi transcription test kar raha hoon. "
+    "This is a Hinglish conversation with both Hindi and English words."
+)
 
 
 def _parse_allowed_languages() -> set[str] | None:
@@ -124,26 +119,6 @@ def _parse_allowed_languages() -> set[str] | None:
 
 
 LANG_WHITELIST = _parse_allowed_languages()
-
-
-def _strip_prompt_leakage(text: str) -> str:
-    """Remove known prompt phrases that Whisper may echo in transcription."""
-    result = text.strip()
-    for phrase in PROMPT_LEAKAGE_PHRASES:
-        # Case-insensitive, remove phrase and surrounding punctuation/spaces
-        lower = result.lower()
-        idx = lower.find(phrase.lower())
-        while idx >= 0:
-            start = idx
-            end = idx + len(phrase)
-            # Extend to trim trailing punctuation
-            while end < len(result) and result[end] in " .,;:!?":
-                end += 1
-            result = (result[:start] + result[end:]).strip()
-            lower = result.lower()
-            idx = lower.find(phrase.lower())
-    return result.strip()
-
 
 # ---------------------------------------------------------------------------
 # Model singleton
@@ -246,11 +221,16 @@ def detect_language_restricted(audio: np.ndarray) -> tuple[str, float]:
     return (best_lang, best_prob)
 
 
-def transcribe_chunk(audio: np.ndarray) -> dict:
-    """Run faster-whisper transcription on a single chunk of audio.
+def transcribe_audio(
+    audio: np.ndarray,
+    confirmed_text: str,
+) -> dict:
+    """Run faster-whisper transcription on a sliding window of audio.
 
     Args:
-        audio: PCM audio chunk (no overlap with previously transcribed audio).
+        audio: The sliding-window PCM audio (last N seconds only).
+        confirmed_text: Already-confirmed transcription text from earlier audio
+                        that has scrolled out of the window.
     """
     t0 = time.monotonic()
 
@@ -263,7 +243,7 @@ def transcribe_chunk(audio: np.ndarray) -> dict:
         audio,
         language=detected_lang,
         initial_prompt=INITIAL_PROMPT,
-        condition_on_previous_text=False,  # No previous context — avoids repetition
+        condition_on_previous_text=True,
         vad_filter=True,
         vad_parameters=dict(
             min_silence_duration_ms=500,
@@ -271,7 +251,7 @@ def transcribe_chunk(audio: np.ndarray) -> dict:
     )
 
     segments = []
-    chunk_text_parts = []
+    window_text_parts = []
     for seg in segments_iter:
         segments.append(
             {
@@ -280,11 +260,10 @@ def transcribe_chunk(audio: np.ndarray) -> dict:
                 "text": seg.text.strip(),
             }
         )
-        chunk_text_parts.append(seg.text.strip())
+        window_text_parts.append(seg.text.strip())
 
     t2 = time.monotonic()
-    chunk_text = " ".join(chunk_text_parts)
-    chunk_text = _strip_prompt_leakage(chunk_text)
+    window_text = " ".join(window_text_parts)
     audio_dur = len(audio) / 16000.0
 
     logger.info(
@@ -296,8 +275,14 @@ def transcribe_chunk(audio: np.ndarray) -> dict:
         (t2 - t0) / audio_dur if audio_dur > 0 else 0,
     )
 
+    # Combine confirmed (old) text with fresh window transcription
+    full_text = (
+        (confirmed_text + " " + window_text).strip() if confirmed_text else window_text
+    )
+
     return {
-        "chunk_text": chunk_text,
+        "text": full_text,
+        "window_text": window_text,
         "language": info.language,
         "language_probability": round(info.language_probability, 3),
         "segments": segments,
@@ -320,16 +305,18 @@ async def websocket_transcribe(ws: WebSocket):
 
     Protocol (binary frames from client -> JSON frames to client):
     - Client sends binary webm/opus audio chunks.
-    - Server accumulates, converts to PCM, and transcribes only NEW audio
-      (chunk-based, no overlap). Each chunk is transcribed exactly once.
+    - Server accumulates, converts to PCM, applies a sliding window,
+      transcribes only the recent audio, and responds with JSON.
     """
     await ws.accept()
     logger.info("WebSocket client connected.")
 
     audio_buffer = bytearray()  # raw webm bytes from browser
     last_transcribe_time: float = 0.0
-    full_text: str = ""  # accumulated transcript (no repetition)
-    transcribed_until_sample: int = 0  # samples we've already transcribed
+    confirmed_text: str = ""  # text from audio that scrolled past the window
+    prev_window_text: str = ""  # last window transcription (for confirming)
+
+    window_samples = int(SLIDING_WINDOW_SECONDS * 16000)
 
     try:
         while True:
@@ -352,44 +339,32 @@ async def websocket_transcribe(ws: WebSocket):
             if full_duration < MIN_AUDIO_SECONDS:
                 continue
 
-            # --- Chunk-based: only transcribe NEW audio not yet transcribed ---
-            new_start = transcribed_until_sample
-            new_end = len(full_pcm)
-            new_samples = new_end - new_start
-            new_duration = new_samples / 16000.0
-
-            if new_duration < CHUNK_SECONDS:
-                # Not enough new audio yet; skip (avoid tiny partial transcriptions)
-                continue
-
             last_transcribe_time = now
 
-            chunk_pcm = full_pcm[new_start:new_end]
-            transcribed_until_sample = new_end
+            # --- Sliding window: only transcribe the last N seconds ---
+            if len(full_pcm) > window_samples:
+                # Audio exceeds window — confirm text from previous window
+                # and only process the tail.
+                if prev_window_text:
+                    confirmed_text = (confirmed_text + " " + prev_window_text).strip()
+                window_pcm = full_pcm[-window_samples:]
+            else:
+                window_pcm = full_pcm
 
             logger.info(
-                "⏱  ffmpeg=%.2fs  full_audio=%.1fs  new_chunk=%.1fs",
+                "⏱  ffmpeg=%.2fs  full_audio=%.1fs  window=%.1fs",
                 t_ffmpeg_end - t_ffmpeg_start,
                 full_duration,
-                new_duration,
+                len(window_pcm) / 16000.0,
             )
 
             # --- Transcribe in thread pool ---
             loop = asyncio.get_running_loop()
-            chunk_result = await loop.run_in_executor(None, transcribe_chunk, chunk_pcm)
+            result = await loop.run_in_executor(
+                None, transcribe_audio, window_pcm, confirmed_text
+            )
 
-            chunk_text = chunk_result.get("chunk_text", "")
-            if chunk_text:
-                full_text = (full_text + " " + chunk_text).strip()
-
-            # Response format matches frontend expectations (text, window_text, segments)
-            result = {
-                "text": full_text,
-                "window_text": chunk_text,  # current chunk for live display
-                "language": chunk_result.get("language"),
-                "language_probability": chunk_result.get("language_probability"),
-                "segments": chunk_result.get("segments", []),
-            }
+            prev_window_text = result.get("window_text", "")
             await ws.send_json(result)
 
     except WebSocketDisconnect:
