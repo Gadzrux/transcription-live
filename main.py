@@ -102,11 +102,10 @@ TRANSCRIBE_INTERVAL = float(os.getenv("TRANSCRIBE_INTERVAL", "1.5"))
 SLIDING_WINDOW_SECONDS = float(os.getenv("SLIDING_WINDOW", "15"))
 
 # Hinglish-optimised initial prompt – biases the model towards code-switching.
-INITIAL_PROMPT = (
-    "Yeh ek Hindi aur English mixed conversation hai. "
-    "Main abhi transcription test kar raha hoon. "
-    "This is a Hinglish conversation with both Hindi and English words."
-)
+# NOTE: Keep this short and natural-sounding. Long/distinctive phrases like
+# "Hinglish code-mixing" WILL leak into transcription output during silence.
+# INITIAL_PROMPT = "हाँ, तो मैं बता रहा था कि, actually, हमें ये काम करना है."
+INITIAL_PROMPT = ""
 
 
 def _parse_allowed_languages() -> set[str] | None:
