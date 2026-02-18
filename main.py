@@ -103,7 +103,7 @@ SLIDING_WINDOW_SECONDS = float(os.getenv("SLIDING_WINDOW", "15"))
 
 # Hinglish-optimised initial prompt – biases the model towards code-switching.
 # Use short keywords only; full sentences can be echoed/hallucinated in output.
-INITIAL_PROMPT = "Hindi English Hinglish code-mixing."
+INITIAL_PROMPT = ""  # removed initial prompt so there is no leak in prompts (Krishnava)
 
 # Phrases that Whisper may echo from the prompt; strip them from output.
 PROMPT_LEAKAGE_PHRASES = [
