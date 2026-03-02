@@ -92,7 +92,7 @@ COMPUTE_TYPE = os.getenv(
 ALLOWED_LANGUAGES = os.getenv("WHISPER_LANGUAGES", "hi,en")
 
 # Minimum audio duration (seconds) before we attempt transcription.
-MIN_AUDIO_SECONDS = 1.5
+MIN_AUDIO_SECONDS = 1.0
 
 # Throttle: minimum gap between successive transcriptions (seconds).
 TRANSCRIBE_INTERVAL = float(os.getenv("TRANSCRIBE_INTERVAL", "1.5"))
@@ -104,11 +104,11 @@ CHUNK_SECONDS = float(os.getenv("CHUNK_SECONDS", "3.0"))
 # Hinglish-optimised initial prompt – biases the model towards code-switching.
 # Use natural Hinglish examples so the model learns the style without echoing
 # meta-descriptions like "Hinglish code-mixing" into the output.
-INITIAL_PROMPT = (
-    "Namaste, aaj hum discuss karenge. "
-    "Toh basically yeh cheez hai ki hum log Hindi aur English dono use karte hain. "
-    "Achha, so let me explain. Yeh bahut important hai."
-)
+# INITIAL_PROMPT = (
+#     "Namaste, aaj hum discuss karenge. "
+#     "Toh basically yeh cheez hai ki hum log Hindi aur English dono use karte hain. "
+#     "Achha, so let me explain. Yeh bahut important hai."
+# )
 
 # Phrases that Whisper may echo from the prompt; strip them from output.
 # Includes both old and new prompt fragments plus common hallucinations.
@@ -325,7 +325,7 @@ def transcribe_chunk(audio: np.ndarray) -> dict:
     segments_iter, info = model.transcribe(
         audio,
         language=detected_lang,
-        initial_prompt=INITIAL_PROMPT,
+        # initial_prompt=INITIAL_PROMPT,
         condition_on_previous_text=False,  # No previous context — avoids repetition
         beam_size=5,
         best_of=3,
