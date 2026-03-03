@@ -81,7 +81,7 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 # Configuration  (all configurable via .env)
 # ---------------------------------------------------------------------------
-MODEL_SIZE = os.getenv("WHISPER_MODEL", "large-v3")
+MODEL_SIZE = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 DEVICE = os.getenv("WHISPER_DEVICE", "cuda")  # "cuda", "cpu", "auto"
 COMPUTE_TYPE = os.getenv(
     "WHISPER_COMPUTE", "int8"
@@ -95,20 +95,15 @@ ALLOWED_LANGUAGES = os.getenv("WHISPER_LANGUAGES", "hi,en")
 MIN_AUDIO_SECONDS = 1.0
 
 # Throttle: minimum gap between successive transcriptions (seconds).
-TRANSCRIBE_INTERVAL = float(os.getenv("TRANSCRIBE_INTERVAL", "1.5"))
+TRANSCRIBE_INTERVAL = float(os.getenv("TRANSCRIBE_INTERVAL", "1.0"))
 
 # Chunk size: minimum new audio (seconds) to transcribe per cycle.
 # Each chunk is transcribed exactly once and appended — no overlapping or repetition.
-CHUNK_SECONDS = float(os.getenv("CHUNK_SECONDS", "3.0"))
+CHUNK_SECONDS = float(os.getenv("CHUNK_SECONDS", "2.0"))
 
-# Hinglish-optimised initial prompt – biases the model towards code-switching.
-# Use natural Hinglish examples so the model learns the style without echoing
-# meta-descriptions like "Hinglish code-mixing" into the output.
-# INITIAL_PROMPT = (
-#     "Namaste, aaj hum discuss karenge. "
-#     "Toh basically yeh cheez hai ki hum log Hindi aur English dono use karte hain. "
-#     "Achha, so let me explain. Yeh bahut important hai."
-# )
+# No initial_prompt — language="hi" is sufficient to get Devanagari output.
+# Any prompt containing common Hindi/English words bleeds into transcription.
+INITIAL_PROMPT = None
 
 # Phrases that Whisper may echo from the prompt; strip them from output.
 # Includes both old and new prompt fragments plus common hallucinations.
@@ -123,7 +118,7 @@ PROMPT_LEAKAGE_PHRASES = [
     "This is a Hinglish conversation with both Hindi and English words",
     "Yeh ek Hindi aur English mixed conversation hai",
     "Main abhi transcription test kar raha hoon",
-    # New prompt leakage
+    # Old romanized prompt leakage
     "Namaste, aaj hum discuss karenge",
     "Toh basically yeh cheez hai ki hum log Hindi aur English dono use karte hain",
     "Achha, so let me explain",
@@ -161,9 +156,11 @@ def _strip_prompt_leakage(text: str) -> str:
             start = idx
             end = idx + len(phrase)
             # Extend to trim leading/trailing punctuation and whitespace
-            while start > 0 and result[start - 1] in " .,;:!?":
+            # Includes Devanagari danda (।) and double danda (॥)
+            _PUNCT = " .,;:!?।॥"
+            while start > 0 and result[start - 1] in _PUNCT:
                 start -= 1
-            while end < len(result) and result[end] in " .,;:!?":
+            while end < len(result) and result[end] in _PUNCT:
                 end += 1
             result = (result[:start] + " " + result[end:]).strip()
             lower = result.lower()
@@ -267,46 +264,33 @@ def webm_bytes_to_pcm(webm_bytes: bytes) -> np.ndarray | None:
 
 
 def detect_language_restricted(audio: np.ndarray) -> tuple[str, float]:
-    """Detect language but only consider LANG_WHITELIST languages.
+    """Always use Hindi for Hinglish transcription.
 
-    For Hinglish (mixed Hindi+English), we use "hi" as default because:
-    - Whisper's Hindi mode handles Devanagari and romanised Hindi well
-    - English words embedded in Hindi speech are still transcribed correctly
-    - Using "en" would miss Hindi-script words entirely
+    When language="hi", Whisper outputs:
+    - Hindi words → Devanagari script
+    - English words → Latin/English script (natural code-mixing)
 
-    Returns (language_code, probability).  Falls back to "hi" if nothing matches.
+    We only fall back to "en" if the model is very confident (~90%+) there is
+    no Hindi at all, to handle rare pure-English segments.
     """
-    if LANG_WHITELIST is None:
-        return (None, 0.0)
-
     _lang, _prob, all_probs = model.detect_language(audio)
-    filtered = {lang: prob for lang, prob in all_probs if lang in LANG_WHITELIST}
+    probs = {lang: prob for lang, prob in all_probs}
 
-    if not filtered:
-        return ("hi", 0.0)
-
-    best_lang = max(filtered, key=filtered.get)
-    best_prob = filtered[best_lang]
-
-    # For Hinglish: if Hindi and English are close (within 20pp), prefer Hindi
-    # because Whisper Hindi mode handles code-mixed text better.
-    hi_prob = filtered.get("hi", 0.0)
-    en_prob = filtered.get("en", 0.0)
-    if best_lang == "en" and hi_prob > 0.15 and (en_prob - hi_prob) < 0.20:
-        logger.info(
-            "Lang detect: en=%.1f%% hi=%.1f%% → overriding to 'hi' for Hinglish",
-            en_prob * 100,
-            hi_prob * 100,
-        )
-        return ("hi", hi_prob)
+    hi_prob = probs.get("hi", 0.0)
+    en_prob = probs.get("en", 0.0)
 
     logger.info(
-        "Lang detect (restricted %s): %s (%.1f%%)",
-        LANG_WHITELIST,
-        best_lang,
-        best_prob * 100,
+        "Lang detect: hi=%.1f%%  en=%.1f%%",
+        hi_prob * 100,
+        en_prob * 100,
     )
-    return (best_lang, best_prob)
+
+    # Use English only when clearly no Hindi present (pure-English segment)
+    if en_prob > 0.85 and hi_prob < 0.05:
+        return ("en", en_prob)
+
+    # Default to Hindi — gives Devanagari for Hindi words, English for English words
+    return ("hi", hi_prob)
 
 
 def transcribe_chunk(audio: np.ndarray) -> dict:
@@ -325,20 +309,20 @@ def transcribe_chunk(audio: np.ndarray) -> dict:
     segments_iter, info = model.transcribe(
         audio,
         language=detected_lang,
-        # initial_prompt=INITIAL_PROMPT,
+        initial_prompt=INITIAL_PROMPT,
         condition_on_previous_text=False,  # No previous context — avoids repetition
-        beam_size=5,
-        best_of=3,
-        patience=1.5,
-        temperature=[0.0, 0.2, 0.4],  # fallback temperatures for robustness
-        compression_ratio_threshold=2.4,  # default; reject overly compressed (repetitive) text
-        log_prob_threshold=-1.0,  # reject low-confidence outputs
-        no_speech_threshold=0.6,  # skip segments likely to be silence
+        beam_size=3,         # Reduced from 5 for speed (turbo handles quality)
+        best_of=1,           # Reduced from 3: turbo is already fast, skip redundant passes
+        patience=1.0,        # Reduced from 1.5 for faster decoding
+        temperature=0.0,     # Single temperature: greedy (turbo model prefers this)
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
         vad_filter=True,
         vad_parameters=dict(
-            min_silence_duration_ms=400,
-            speech_pad_ms=200,  # pad detected speech regions
-            threshold=0.35,  # slightly lower VAD threshold to catch softer speech
+            min_silence_duration_ms=300,  # slightly tighter for faster detection
+            speech_pad_ms=150,
+            threshold=0.35,
         ),
     )
 
